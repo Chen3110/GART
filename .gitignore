@@ -173,3 +173,5 @@ logs
 tools
 lib_gart/smal/smal_data
 dev_tools
+.vscode
+test*

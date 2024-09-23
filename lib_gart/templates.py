@@ -8,8 +8,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from smplx.smplx import SMPLLayer
-from smplx.smplx.lbs import blend_shapes, vertices2joints, batch_rigid_transform
+from smpl_x.smplx import SMPLLayer
+from smpl_x.smplx.lbs import blend_shapes, vertices2joints, batch_rigid_transform
 from smal.smal_tpg import SMAL
 from voxel_deformer import VoxelDeformer
 

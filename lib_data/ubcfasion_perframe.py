@@ -141,7 +141,7 @@ class Dataset(Dataset):
                     / 255.0
                 )
                 mask = masktool.decode(masks[int(fid)].copy())
-                mask = mask.astype(np.bool).astype(np.float32)
+                mask = mask.astype(np.bool_).astype(np.float32)
 
                 assert (
                     img.shape[0] - center[1] * 2

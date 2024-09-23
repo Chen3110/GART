@@ -25,7 +25,7 @@ import sys
 
 sys.path.append(osp.dirname(osp.abspath(__file__)))
 
-from smplx.smplx import SMPLLayer
+from smpl_x.smplx import SMPLLayer
 
 META = {
     "my_377": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
@@ -318,7 +318,7 @@ class Dataset(Dataset):
 
         ret = {
             "rgb": img.astype(np.float32),
-            "mask": msk.astype(np.bool).astype(np.float32),
+            "mask": msk.astype(np.bool_).astype(np.float32),
             "K": K.copy().astype(np.float32),
             "smpl_beta": self.beta.astype(np.float32),
             "smpl_pose": self.smpl_theta_list[index].astype(np.float32),
