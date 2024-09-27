@@ -2,6 +2,7 @@ from matplotlib import pyplot as plt
 from pytorch3d.transforms import matrix_to_axis_angle
 import imageio
 import torch
+import torchvision
 from tqdm import tqdm
 import numpy as np
 import os, os.path as osp, shutil, sys
@@ -11,6 +12,7 @@ from omegaconf import OmegaConf
 from lib_data.get_data import prepare_real_seq
 from lib_data.data_provider import DatabasePoseProvider
 
+from lib_gart.hmr2.models import load_hmr2
 from lib_gart.templates import get_template
 from lib_gart.model import GaussianTemplateModel, AdditionalBones
 
@@ -83,6 +85,7 @@ class TGFitter:
 
         self.LAMBDA_SSIM = getattr(self, "LAMBDA_SSIM", 0.0)
         self.LAMBDA_LPIPS = getattr(self, "LAMBDA_LPIPS", 0.0)
+        self.LAMBDA_POSE = getattr(self, "LAMBDA_POSE", 0.0)
         if self.LAMBDA_LPIPS > 0:
             from utils.lpips import LPIPS
 
@@ -126,6 +129,7 @@ class TGFitter:
         self.writer = create_log(
             self.log_dir, name=osp.basename(self.profile_fn).split(".")[0], debug=False
         )
+        self.resize_transform = torchvision.transforms.Resize((256, 256))
         return
 
     def prepare_fake_data(self, mode, *args, **kwargs):
@@ -196,7 +200,10 @@ class TGFitter:
             ),
             pose_dim=23 * 3 if self.mode == "human" else 34 * 3 + 7,
         )
-
+        
+        hmr_model, model_cfg = load_hmr2('data/hmr/epoch=35-step=1000000.ckpt')
+        hmr_model = hmr_model.to(self.device)
+        
         model = GaussianTemplateModel(
             template=template,
             add_bones=add_bones,
@@ -275,6 +282,7 @@ class TGFitter:
 
         return (
             model,
+            hmr_model,
             optimizer,
             xyz_scheduler_func,
             w_dc_scheduler_func,
@@ -553,6 +561,7 @@ class TGFitter:
         model,
         data_pack,
         act_sph_ord,
+        hmr_model=None,
         random_bg=True,
         scale_multiplier=1.0,
         opacity_multiplier=1.0,
@@ -564,7 +573,15 @@ class TGFitter:
         gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = data_pack
         gt_rgb = gt_rgb.clone()
 
-        pose = torch.cat([pose_base, pose_rest], dim=1)
+        if hmr_model is not None:
+            resized_rgb = self.resize_transform(gt_rgb.permute(0,3,1,2).contiguous())
+            hmr_output = hmr_model(resized_rgb)
+            pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
+            pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
+            pose = torch.cat([pred_pose_base, pred_pose_rest], dim=1)
+        else:
+            pose = torch.cat([pose_base, pose_rest], dim=1)
+
         H, W = gt_rgb.shape[1:3]
         additional_dict = {"t": time_index}
         if add_bones_As is not None:
@@ -585,6 +602,7 @@ class TGFitter:
             torch.zeros(1).to(gt_rgb.device).squeeze(),
         )
         loss_mask = 0.0
+        loss_pose = 0.0
         render_pkg_list, rgb_target_list, mask_target_list = [], [], []
         for i in range(len(gt_rgb)):
             if random_bg:
@@ -633,6 +651,10 @@ class TGFitter:
                 )
                 loss_ssim = loss_ssim + _loss_ssim
 
+            if hmr_model is not None:
+                _loss_pose = abs(pose - torch.cat([pose_base, pose_rest], dim=1)).mean()
+                loss_pose = loss_pose + _loss_pose
+
             loss_recon = loss_recon + _loss_recon
             loss_mask = loss_mask + _loss_mask
             render_pkg_list.append(render_pkg)
@@ -643,9 +665,10 @@ class TGFitter:
         loss_mask = loss_mask / len(gt_rgb)
         loss_lpips = loss_lpips / len(gt_rgb)
         loss_ssim = loss_ssim / len(gt_rgb)
+        loss_pose = loss_pose / len(gt_rgb)
 
         loss = (
-            loss_recon + self.LAMBDA_SSIM * loss_ssim + self.LAMBDA_LPIPS * loss_lpips
+            loss_recon + self.LAMBDA_SSIM * loss_ssim + self.LAMBDA_LPIPS * loss_lpips + self.LAMBDA_POSE * loss_pose
         )
 
         return (
@@ -659,6 +682,7 @@ class TGFitter:
                 "loss_l1_recon": loss_recon,
                 "loss_lpips": loss_lpips,
                 "loss_ssim": loss_ssim,
+                "loss_pose": loss_pose,
             },
         )
 
@@ -777,6 +801,7 @@ class TGFitter:
             # self.amp_scaler = torch.cuda.amp.GradScaler()
         (
             model,
+            hmr_model,
             optimizer,
             xyz_scheduler_func,
             w_dc_scheduler_func,
@@ -832,6 +857,7 @@ class TGFitter:
                     loss_dict,
                 ) = self._fit_step(
                     model,
+                    hmr_model=hmr_model,
                     data_pack=real_data_pack,
                     act_sph_ord=active_sph_order,
                     random_bg=self.RAND_BG_FLAG,
