@@ -2,7 +2,6 @@ from matplotlib import pyplot as plt
 from pytorch3d.transforms import matrix_to_axis_angle
 import imageio
 import torch
-import torchvision
 from tqdm import tqdm
 import numpy as np
 import os, os.path as osp, shutil, sys
@@ -45,6 +44,7 @@ try:
 except:
     logging.warning("No guidance module")
 
+from lib_render.visualization import StreamVisualization, generator
 
 class TGFitter:
     def __init__(
@@ -129,7 +129,11 @@ class TGFitter:
         self.writer = create_log(
             self.log_dir, name=osp.basename(self.profile_fn).split(".")[0], debug=False
         )
-        self.resize_transform = torchvision.transforms.Resize((256, 256))
+        
+        self.visualize_smpl = getattr(self, "VIZ_SMPL", 0)
+        if self.visualize_smpl:
+            self.o3d_viz = StreamVisualization()
+
         return
 
     def prepare_fake_data(self, mode, *args, **kwargs):
@@ -169,7 +173,8 @@ class TGFitter:
     def load_saved_model(self, ckpt_path=None):
         if ckpt_path is None:
             ckpt_path = osp.join(self.log_dir, "model.pth")
-        ret = self._get_model_optimizer(betas=None)
+        use_hmr = getattr(self, "USE_HMR", False)
+        ret = self._get_model_optimizer(betas=None, use_hmr=use_hmr)
         model = ret[0]
 
         model.load(torch.load(ckpt_path))
@@ -179,7 +184,7 @@ class TGFitter:
         model.summary()
         return model
 
-    def _get_model_optimizer(self, betas, add_bones_total_t=0):
+    def _get_model_optimizer(self, betas, add_bones_total_t=0, use_hmr=True):
         seed_everything(self.SEED)
 
         template = get_template(
@@ -200,9 +205,6 @@ class TGFitter:
             ),
             pose_dim=23 * 3 if self.mode == "human" else 34 * 3 + 7,
         )
-        
-        hmr_model, model_cfg = load_hmr2('data/hmr/epoch=35-step=1000000.ckpt')
-        hmr_model = hmr_model.to(self.device)
         
         model = GaussianTemplateModel(
             template=template,
@@ -229,6 +231,13 @@ class TGFitter:
             scale_init_value=getattr(self, "SCALE_INIT_VALUE", 1.0),
         ).to(self.device)
 
+        if use_hmr:
+            hmr_model, model_cfg = load_hmr2('data/hmr/epoch=35-step=1000000.ckpt')
+            hmr_model = hmr_model.to(self.device)
+            # optimizer_hmr = torch.optim.Adam({"params": model.hmr_model.parameters(), "lr": getattr(self, "LR_HMR", 0.0)})
+        else:
+            hmr_model = None
+
         logging.info(f"Init with {model.N} Gaussians")
 
         # * set optimizer
@@ -244,6 +253,7 @@ class TGFitter:
                 lr_w=self.LR_W,
                 lr_w_rest=self.LR_W_REST,
                 lr_f=getattr(self, "LR_F_LOCAL", 0.0),
+                lr_hmr=getattr(self, "LR_HMR", 0.0),
             ),
         )
 
@@ -282,7 +292,6 @@ class TGFitter:
 
         return (
             model,
-            hmr_model,
             optimizer,
             xyz_scheduler_func,
             w_dc_scheduler_func,
@@ -561,7 +570,6 @@ class TGFitter:
         model,
         data_pack,
         act_sph_ord,
-        hmr_model=None,
         random_bg=True,
         scale_multiplier=1.0,
         opacity_multiplier=1.0,
@@ -573,9 +581,14 @@ class TGFitter:
         gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = data_pack
         gt_rgb = gt_rgb.clone()
 
-        if hmr_model is not None:
-            resized_rgb = self.resize_transform(gt_rgb.permute(0,3,1,2).contiguous())
-            hmr_output = hmr_model(resized_rgb)
+        if model.hmr_model is not None:
+            res_rgb_list = []
+            for i in range(len(gt_rgb)):
+                _yl, _yr, _xl, _xr = get_bbox(gt_mask[i], 10, square=True)
+                crop_rgb = gt_rgb[i][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
+                res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
+                res_rgb_list.append(res_rgb)
+            hmr_output = model.hmr_model(torch.cat(res_rgb_list, dim=0))
             pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
             pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
             pose = torch.cat([pred_pose_base, pred_pose_rest], dim=1)
@@ -596,13 +609,23 @@ class TGFitter:
         sc = sc * scale_multiplier
         op = op * opacity_multiplier
 
+        if self.visualize_smpl:
+            gt_smpl_params = {}
+            gt_smpl_params['global_orient'] = axis_angle_to_matrix(pose_base)
+            gt_smpl_params['body_pose'] = axis_angle_to_matrix(pose_rest)
+            gt_smpl_params['betas'] = hmr_output['pred_smpl_params']['betas']
+            gt_smpl_output = model.hmr_model.smpl(**{k: v.float() for k,v in gt_smpl_params.items()}, pose2rot=False)
+            gs_points = torch.cat((mu-global_trans, sph), dim=-1)
+            gen = generator(points=gs_points, pred_vertices=hmr_output['pred_vertices'], gt_vertices=gt_smpl_output.vertices, faces=model.hmr_model.smpl.faces)
+            self.o3d_viz.show(gen)
+
         loss_recon = 0.0
-        loss_lpips, loss_ssim = (
+        loss_lpips, loss_ssim, loss_pose = (
+            torch.zeros(1).to(gt_rgb.device).squeeze(),
             torch.zeros(1).to(gt_rgb.device).squeeze(),
             torch.zeros(1).to(gt_rgb.device).squeeze(),
         )
         loss_mask = 0.0
-        loss_pose = 0.0
         render_pkg_list, rgb_target_list, mask_target_list = [], [], []
         for i in range(len(gt_rgb)):
             if random_bg:
@@ -651,8 +674,8 @@ class TGFitter:
                 )
                 loss_ssim = loss_ssim + _loss_ssim
 
-            if hmr_model is not None:
-                _loss_pose = abs(pose - torch.cat([pose_base, pose_rest], dim=1)).mean()
+            if model.hmr_model is not None:
+                _loss_pose = torch.abs(pose - torch.cat([pose_base, pose_rest], dim=1)).mean()
                 loss_pose = loss_pose + _loss_pose
 
             loss_recon = loss_recon + _loss_recon
@@ -751,8 +774,6 @@ class TGFitter:
         return reg_loss, details
 
     def add_scalar(self, *args, **kwargs):
-        if self.FAST_TRAINING:
-            return
         if getattr(self, "NO_TB", False):
             return
         self.writer.add_scalar(*args, **kwargs)
@@ -791,6 +812,8 @@ class TGFitter:
         fake_flag = fake_data_provider is not None
         assert real_flag or fake_flag
 
+        use_hmr = getattr(self, "USE_HMR", False)
+
         if real_flag:
             init_beta = real_data_provider.betas
             total_t = real_data_provider.total_t
@@ -801,14 +824,13 @@ class TGFitter:
             # self.amp_scaler = torch.cuda.amp.GradScaler()
         (
             model,
-            hmr_model,
             optimizer,
             xyz_scheduler_func,
             w_dc_scheduler_func,
             w_rest_scheduler_func,
             sph_scheduler_func,
             sph_rest_scheduler_func,
-        ) = self._get_model_optimizer(betas=init_beta, add_bones_total_t=total_t)
+        ) = self._get_model_optimizer(betas=init_beta, add_bones_total_t=total_t, use_hmr=use_hmr)
 
         optimizer_pose, scheduler_pose = self._get_pose_optimizer(
             real_data_provider, model.add_bones
@@ -857,7 +879,6 @@ class TGFitter:
                     loss_dict,
                 ) = self._fit_step(
                     model,
-                    hmr_model=hmr_model,
                     data_pack=real_data_pack,
                     act_sph_ord=active_sph_order,
                     random_bg=self.RAND_BG_FLAG,

@@ -244,7 +244,7 @@ class GaussianTemplateModel(nn.Module):
         self.register_buffer("xyz_gradient_denom", torch.zeros(self.N).long())
         self.register_buffer("max_radii2D", torch.zeros(self.N).float())
 
-        self.op_update_exclude = ["add_bones"]
+        self.op_update_exclude = ["add_bones", "hmr"]
         if self.w_memory_type != "point":
             self.op_update_exclude.extend(["w_dc_vox", "w_rest_vox"])
         # self.summary()
@@ -476,6 +476,7 @@ class GaussianTemplateModel(nn.Module):
         lr_w=0.001,
         lr_w_rest=0.001,
         lr_f=0.0001,
+        lr_hmr=0.0001,
     ):
         lr_sph_rest = lr_sph / 20 if lr_sph_rest is None else lr_sph_rest
         l = [
@@ -506,6 +507,8 @@ class GaussianTemplateModel(nn.Module):
                         "name": "w_rest_vox",
                     }
                 )
+        if lr_hmr > 0 and self.hmr_model is not None:
+            l.append({"params": self.hmr_model.parameters(), "lr": lr_hmr, "name": "hmr",})
         return l
 
     # * Gaussian Control

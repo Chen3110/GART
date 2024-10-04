@@ -31,7 +31,7 @@ def fov2K(fov=90, H=256, W=256):
         return K.copy()
 
 
-def get_bbox(mask, padding):
+def get_bbox(mask, padding, square=False):
     # mask: H,W, 0-1, get the bbox with padding
     assert mask.ndim == 2
     assert isinstance(mask, torch.Tensor)
@@ -41,6 +41,16 @@ def get_bbox(mask, padding):
 
     xl, xr = xm.nonzero().min(), xm.nonzero().max()
     yl, yr = ym.nonzero().min(), ym.nonzero().max()
+
+    if square:
+        size_x, size_y = xr - xl, yr - yl
+        diff = abs(size_x - size_y) // 2
+        if size_x > size_y:
+            yr = yr + diff
+            yl = yl - diff
+        elif size_x < size_y:
+            xr = xr + diff
+            xl = xl - diff
 
     xl, xr = max(0, xl - padding), min(mask.shape[1], xr + padding)
     yl, yr = max(0, yl - padding), min(mask.shape[0], yr + padding)
