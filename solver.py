@@ -232,11 +232,21 @@ class TGFitter:
         ).to(self.device)
 
         if use_hmr:
-            hmr_model, model_cfg = load_hmr2('data/hmr/epoch=35-step=1000000.ckpt')
-            hmr_model = hmr_model.to(self.device)
-            # optimizer_hmr = torch.optim.Adam({"params": model.hmr_model.parameters(), "lr": getattr(self, "LR_HMR", 0.0)})
+            hmr_model, _ = load_hmr2('data/hmr/epoch=35-step=1000000.ckpt')
+            model.hmr_model = hmr_model.to(self.device)
+            optimizer_hmr = torch.optim.Adam([{"params": model.hmr_model.parameters(), 
+                                               "lr": getattr(self, "LR_HMR", 0.0),
+                                               "name": "hmr"}])
+            hmr_scheduler_func = get_expon_lr_func(
+                lr_init=self.LR_HMR,
+                lr_final=self.LR_HMR_FINAL,
+                lr_delay_mult=0.01,  # 0.02
+                max_steps=self.TOTAL_steps,
+            )
         else:
-            hmr_model = None
+            model.hmr_model = None
+            optimizer_hmr = None
+            hmr_scheduler_func = None
 
         logging.info(f"Init with {model.N} Gaussians")
 
@@ -253,7 +263,7 @@ class TGFitter:
                 lr_w=self.LR_W,
                 lr_w_rest=self.LR_W_REST,
                 lr_f=getattr(self, "LR_F_LOCAL", 0.0),
-                lr_hmr=getattr(self, "LR_HMR", 0.0),
+                # lr_hmr=getattr(self, "LR_HMR", 0.0),
             ),
         )
 
@@ -293,11 +303,13 @@ class TGFitter:
         return (
             model,
             optimizer,
+            optimizer_hmr,
             xyz_scheduler_func,
             w_dc_scheduler_func,
             w_rest_scheduler_func,
             sph_scheduler_func,
             sph_rest_scheduler_func,
+            hmr_scheduler_func,
         )
 
     def _get_pose_optimizer(self, data_provider, add_bones):
@@ -825,11 +837,13 @@ class TGFitter:
         (
             model,
             optimizer,
+            optimizer_hmr,
             xyz_scheduler_func,
             w_dc_scheduler_func,
             w_rest_scheduler_func,
             sph_scheduler_func,
             sph_rest_scheduler_func,
+            hmr_scheduler_func,
         ) = self._get_model_optimizer(betas=init_beta, add_bones_total_t=total_t, use_hmr=use_hmr)
 
         optimizer_pose, scheduler_pose = self._get_pose_optimizer(
@@ -855,6 +869,9 @@ class TGFitter:
             )
             for k, v in scheduler_pose.items():
                 update_learning_rate(v(step), k, optimizer_pose)
+            if model.hmr_model is not None:
+                update_learning_rate(hmr_scheduler_func(step), "hmr", optimizer_hmr)
+                optimizer_hmr.zero_grad()
 
             if step in self.INCREASE_SPH_STEP:
                 active_sph_order += 1
@@ -930,6 +947,9 @@ class TGFitter:
 
             loss.backward()
             optimizer.step()
+
+            if model.hmr_model is not None and step > getattr(self, "HMR_OPTIMIZE_START_STEP", -1):
+                optimizer_hmr.step()
 
             if step > getattr(self, "POSE_OPTIMIZE_START_STEP", -1):
                 optimizer_pose.step()
