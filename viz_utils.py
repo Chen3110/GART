@@ -196,16 +196,17 @@ def viz_human_all(
         for t in range(len(pose_list)):
             if t % training_skip != 0:
                 continue
-            if model.hmr_model is not None:
-                _yl, _yr, _xl, _xr = get_bbox(mask_list[t], 10, square=True)
-                crop_rgb = rgb_list[t][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
-                res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
-                hmr_output = model.hmr_model(res_rgb)
-                pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
-                pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
-                pose = torch.cat([pred_pose_base, pred_pose_rest], dim=1)
-            else:
-                pose = pose_list[t][None]
+            # if model.hmr_model is not None:
+            #     _yl, _yr, _xl, _xr = get_bbox(mask_list[t], 10, square=True)
+            #     crop_rgb = rgb_list[t][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
+            #     res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
+            #     hmr_output = model.hmr_model(res_rgb)
+            #     pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
+            #     pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
+            #     pose = torch.cat([pred_pose_base, pred_pose_rest], dim=1)
+            # else:
+            #     pose = pose_list[t][None]
+            pose = pose_list[t][None]
             K = K_list[t]
             trans = global_trans_list[t][None]
             time_index = torch.Tensor([t]).long().to(solver.device)

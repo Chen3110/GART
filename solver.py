@@ -12,6 +12,7 @@ from lib_data.get_data import prepare_real_seq
 from lib_data.data_provider import DatabasePoseProvider
 
 from lib_gart.hmr2.models import load_hmr2
+from lib_gart.hmr2.models.smpl_wrapper import SMPL
 from lib_gart.templates import get_template
 from lib_gart.model import GaussianTemplateModel, AdditionalBones
 
@@ -132,6 +133,9 @@ class TGFitter:
         
         self.visualize_smpl = getattr(self, "VIZ_SMPL", 0)
         if self.visualize_smpl:
+            self.smpl = SMPL(model_path='data/smpl-meta',
+                             num_body_joints=23,
+                             mean_params='data/smpl-meta/smpl_mean_params.npz').to(self.device)
             self.o3d_viz = StreamVisualization()
 
         return
@@ -590,24 +594,10 @@ class TGFitter:
         default_bg=[1.0, 1.0, 1.0],
         add_bones_As=None,
     ):
-        gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = data_pack
+        gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = data_pack[:7]
         gt_rgb = gt_rgb.clone()
-
-        if model.hmr_model is not None:
-            res_rgb_list = []
-            for i in range(len(gt_rgb)):
-                _yl, _yr, _xl, _xr = get_bbox(gt_mask[i], 10, square=True)
-                crop_rgb = gt_rgb[i][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
-                res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
-                res_rgb_list.append(res_rgb)
-            hmr_output = model.hmr_model(torch.cat(res_rgb_list, dim=0))
-            pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
-            pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
-            pose = torch.cat([pred_pose_base, pred_pose_rest], dim=1)
-        else:
-            pose = torch.cat([pose_base, pose_rest], dim=1)
-
         H, W = gt_rgb.shape[1:3]
+        pose = torch.cat([pose_base, pose_rest], dim=1)
         additional_dict = {"t": time_index}
         if add_bones_As is not None:
             additional_dict["As"] = add_bones_As
@@ -620,16 +610,6 @@ class TGFitter:
 
         sc = sc * scale_multiplier
         op = op * opacity_multiplier
-
-        if self.visualize_smpl:
-            gt_smpl_params = {}
-            gt_smpl_params['global_orient'] = axis_angle_to_matrix(pose_base)
-            gt_smpl_params['body_pose'] = axis_angle_to_matrix(pose_rest)
-            gt_smpl_params['betas'] = hmr_output['pred_smpl_params']['betas']
-            gt_smpl_output = model.hmr_model.smpl(**{k: v.float() for k,v in gt_smpl_params.items()}, pose2rot=False)
-            gs_points = torch.cat((mu-global_trans, sph), dim=-1)
-            gen = generator(points=gs_points, pred_vertices=hmr_output['pred_vertices'], gt_vertices=gt_smpl_output.vertices, faces=model.hmr_model.smpl.faces)
-            self.o3d_viz.show(gen)
 
         loss_recon = 0.0
         loss_lpips, loss_ssim, loss_pose = (
@@ -687,7 +667,7 @@ class TGFitter:
                 loss_ssim = loss_ssim + _loss_ssim
 
             if model.hmr_model is not None:
-                _loss_pose = torch.abs(pose - torch.cat([pose_base, pose_rest], dim=1)).mean()
+                _loss_pose = torch.abs(pose - data_pack[7]).mean()
                 loss_pose = loss_pose + _loss_pose
 
             loss_recon = loss_recon + _loss_recon
@@ -695,6 +675,30 @@ class TGFitter:
             render_pkg_list.append(render_pkg)
             rgb_target_list.append(rgb_target)
             mask_target_list.append(mask_target)
+
+            if self.visualize_smpl:
+                with torch.no_grad():
+                    _yl, _yr, _xl, _xr = get_bbox(gt_mask[i], 10, square=True)
+                    crop_rgb = gt_rgb[i][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
+                    res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
+                    hmr_output = model.hmr_model(res_rgb)
+                    opti_smpl_params = {}
+                    opti_smpl_params['global_orient'] = axis_angle_to_matrix(pose_base[i][None])
+                    opti_smpl_params['body_pose'] = axis_angle_to_matrix(pose_rest[i][None])
+                    opti_smpl_params['betas'] = hmr_output['pred_smpl_params']['betas']
+                    opti_smpl_output = self.smpl(**{k: v.float() for k,v in opti_smpl_params.items()}, pose2rot=False)
+                    gt_smpl_params = {}
+                    gt_smpl_params['global_orient'] = axis_angle_to_matrix(data_pack[7][i][:1][None])
+                    gt_smpl_params['body_pose'] = axis_angle_to_matrix(data_pack[7][i][1:][None])
+                    gt_smpl_params['betas'] = hmr_output['pred_smpl_params']['betas']
+                    gt_smpl_output = self.smpl(**{k: v.float() for k,v in gt_smpl_params.items()}, pose2rot=False)
+                    gs_points = torch.cat((mu-global_trans, sph), dim=-1)
+                    gen = generator(points=gs_points,
+                                    pred_vertices=hmr_output['pred_vertices'],
+                                    opti_vertices=opti_smpl_output.vertices, 
+                                    gt_vertices=gt_smpl_output.vertices,
+                                    faces=self.smpl.faces)
+                    self.o3d_viz.show(gen)
 
         loss_recon = loss_recon / len(gt_rgb)
         loss_mask = loss_mask / len(gt_rgb)
@@ -846,6 +850,25 @@ class TGFitter:
             hmr_scheduler_func,
         ) = self._get_model_optimizer(betas=init_beta, add_bones_total_t=total_t, use_hmr=use_hmr)
 
+        if model.hmr_model is not None:
+            with torch.no_grad():
+                rgb_list, mask_list = real_data_provider.rgb_list, real_data_provider.mask_list
+                pred_pose_base_list = []
+                pred_pose_rest_list = []
+                for i in range(len(rgb_list)):
+                    _yl, _yr, _xl, _xr = get_bbox(mask_list[i], 10, square=True)
+                    crop_rgb = rgb_list[i][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
+                    res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
+                    hmr_output = model.hmr_model(res_rgb)
+                    pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
+                    pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
+                    pred_pose_base_list.append(pred_pose_base)
+                    pred_pose_rest_list.append(pred_pose_rest)
+                real_data_provider.gt_pose_base_list = real_data_provider.pose_base_list.clone()
+                real_data_provider.gt_pose_rest_list = real_data_provider.pose_rest_list.clone()
+                real_data_provider.pose_base_list = torch.nn.Parameter(torch.cat(pred_pose_base_list, dim=0))
+                real_data_provider.pose_rest_list = torch.nn.Parameter(torch.cat(pred_pose_rest_list, dim=0))
+
         optimizer_pose, scheduler_pose = self._get_pose_optimizer(
             real_data_provider, model.add_bones
         )
@@ -869,9 +892,6 @@ class TGFitter:
             )
             for k, v in scheduler_pose.items():
                 update_learning_rate(v(step), k, optimizer_pose)
-            if model.hmr_model is not None:
-                update_learning_rate(hmr_scheduler_func(step), "hmr", optimizer_hmr)
-                optimizer_hmr.zero_grad()
 
             if step in self.INCREASE_SPH_STEP:
                 active_sph_order += 1
@@ -884,7 +904,7 @@ class TGFitter:
             loss = 0.0
             if real_flag:
                 real_data_pack = real_data_provider(
-                    self.N_POSES_PER_STEP, continuous=False
+                    self.N_POSES_PER_STEP, continuous=False, use_hmr=use_hmr
                 )
                 (
                     loss_recon,
@@ -947,9 +967,6 @@ class TGFitter:
 
             loss.backward()
             optimizer.step()
-
-            if model.hmr_model is not None and step > getattr(self, "HMR_OPTIMIZE_START_STEP", -1):
-                optimizer_hmr.step()
 
             if step > getattr(self, "POSE_OPTIMIZE_START_STEP", -1):
                 optimizer_pose.step()
@@ -1024,7 +1041,7 @@ class TGFitter:
                         pose_rest,
                         global_trans,
                         time_index,
-                    ) = real_data_pack
+                    ) = real_data_pack[:7]
                     viz_spinning(
                         model,
                         torch.cat([pose_base, pose_rest], 1)[:1],
@@ -1100,6 +1117,26 @@ class TGFitter:
                 test_results = self.eval_dir(f"test_{step}")
                 for k, v in test_results.items():
                     self.add_scalar(f"test_{k}", v, step)
+
+        # if model.hmr_model is not None:
+        #     optimizer_hmr.zero_grad()
+        #     for i in range(len(rgb_list)):
+        #         update_learning_rate(hmr_scheduler_func(i), "hmr", optimizer_hmr)
+        #         _yl, _yr, _xl, _xr = get_bbox(mask_list[i], 10, square=True)
+        #         crop_rgb = rgb_list[i][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
+        #         res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
+        #         hmr_output = model.hmr_model(res_rgb)
+        #         pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
+        #         pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
+
+        #         loss_base_pose = torch.abs(pred_pose_base - real_data_provider.pose_base_list[i].clone()).mean()
+        #         loss_rest_pose = torch.abs(pred_pose_rest - real_data_provider.pose_rest_list[i].clone()).mean()
+        #         loss_hmr = loss_base_pose + loss_rest_pose
+
+        #         loss_hmr.backward()
+        #         optimizer_hmr.step()
+        #         self.add_scalar("loss_hmr", loss_hmr.detach(), i)
+
 
         running_end_t = time.time()
         logging.info(

@@ -281,6 +281,7 @@ class StreamVisualization(O3DStreamPlot):
             pred_joints=o3d_lines,
             label_joints=o3d_lines,
             pred_verts=o3d_mesh,
+            opti_verts=o3d_mesh,
             label_verts=o3d_mesh,
             skeleton=o3d_lines,
             vert_pcl=o3d_pcl,
@@ -297,10 +298,10 @@ class StreamVisualization(O3DStreamPlot):
         #     mat.line_width = 10  # note that this is scaled with respect to pixels,
         
         super().init_show()
-        self.ctr.set_up(np.array([[0], [0], [1]]))
-        self.ctr.set_front(np.array([[0], [-1], [0]]))
-        # self.ctr.set_up(np.array([[0], [-1], [0]]))
-        # self.ctr.set_front(np.array([[0], [0], [-1]]))
+        # self.ctr.set_up(np.array([[0], [0], [1]]))
+        # self.ctr.set_front(np.array([[0], [-1], [0]]))
+        self.ctr.set_up(np.array([[0], [-1], [0]]))
+        self.ctr.set_front(np.array([[0], [0], [-1]]))
         self.ctr.set_lookat(np.array([0, 0, 0]))
         self.ctr.set_zoom(1)
 
@@ -339,7 +340,7 @@ def copy2cpu(tensor):
         return None
 
 
-def generator(points=None, pred_joints=None, gt_joints=None, pred_vertices=None, gt_vertices=None, faces=None):
+def generator(points=None, pred_joints=None, gt_joints=None, pred_vertices=None, opti_vertices=None, gt_vertices=None, faces=None):
     for i in range(len(pred_vertices)):
         res = {}
         res.update(dict(
@@ -359,7 +360,11 @@ def generator(points=None, pred_joints=None, gt_joints=None, pred_vertices=None,
             ),
             pred_verts = dict(
                 mesh = [copy2cpu(pred_vertices)[i], copy2cpu(faces)] if pred_vertices is not None else None,
-                color = np.asarray([179, 230, 213]) / 255
+                color = np.asarray([143, 240, 166]) / 255
+            ),
+            opti_verts = dict(
+                mesh = [copy2cpu(opti_vertices)[i], copy2cpu(faces)] if opti_vertices is not None else None,
+                color = np.asarray([158, 219, 251]) / 255
             ),
             label_verts = dict(
                 mesh = [copy2cpu(gt_vertices)[i], copy2cpu(faces)] if gt_vertices is not None else None,
