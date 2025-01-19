@@ -2,6 +2,7 @@ import sys, os, os.path as osp
 
 sys.path.append(osp.dirname(osp.abspath(__file__)))
 
+from lib_data.aist import AISTDataset
 from ubcfasion_perframe import Dataset as UBCFasionDataset
 from instant_avatar_people_snapshot import Dataset as InstantAvatarDataset
 from zju_mocap import Dataset as ZJUDataset, get_batch_sampler
@@ -42,6 +43,13 @@ def prepare_real_seq(
     elif dataset_mode == "zju":
         dataset = ZJUDataset(
             data_root="./data/zju_mocap",
+            video_name=seq_name,
+            split=split,
+            image_zoom_ratio=image_zoom_ratio,
+        )
+    elif dataset_mode == "aist":
+        dataset = AISTDataset(
+            data_root="./data/aist",
             video_name=seq_name,
             split=split,
             image_zoom_ratio=image_zoom_ratio,

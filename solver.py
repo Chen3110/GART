@@ -45,7 +45,7 @@ try:
 except:
     logging.warning("No guidance module")
 
-from lib_render.visualization import StreamVisualization, generator
+from lib_render.visualization import StreamVisualization
 
 class TGFitter:
     def __init__(
@@ -131,11 +131,12 @@ class TGFitter:
             self.log_dir, name=osp.basename(self.profile_fn).split(".")[0], debug=False
         )
         
-        self.visualize_smpl = getattr(self, "VIZ_SMPL", 0)
-        if self.visualize_smpl:
-            self.smpl = SMPL(model_path='data/smpl-meta',
-                             num_body_joints=23,
-                             mean_params='data/smpl-meta/smpl_mean_params.npz').to(self.device)
+        self.smpl = SMPL(model_path='data/smpl-meta',
+                            num_body_joints=23,
+                            mean_params='data/smpl-meta/smpl_mean_params.npz').to(self.device)
+        self.render_mesh = getattr(self, "RENDER_MESH", 0)
+        self.viz_smpl = getattr(self, "VIZ_SMPL", 0)
+        if self.viz_smpl:
             self.o3d_viz = StreamVisualization()
 
         return
@@ -595,6 +596,7 @@ class TGFitter:
         add_bones_As=None,
     ):
         gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = data_pack[:7]
+        gt_pose, betas = data_pack[7:] if len(data_pack) > 7 else (None, None)
         gt_rgb = gt_rgb.clone()
         H, W = gt_rgb.shape[1:3]
         pose = torch.cat([pose_base, pose_rest], dim=1)
@@ -666,8 +668,8 @@ class TGFitter:
                 )
                 loss_ssim = loss_ssim + _loss_ssim
 
-            if model.hmr_model is not None:
-                _loss_pose = torch.abs(pose - data_pack[7]).mean()
+            if gt_pose is not None:
+                _loss_pose = torch.abs(pose - gt_pose).mean()
                 loss_pose = loss_pose + _loss_pose
 
             loss_recon = loss_recon + _loss_recon
@@ -676,27 +678,29 @@ class TGFitter:
             rgb_target_list.append(rgb_target)
             mask_target_list.append(mask_target)
 
-            if self.visualize_smpl:
+            if self.viz_smpl:
                 with torch.no_grad():
-                    _yl, _yr, _xl, _xr = get_bbox(gt_mask[i], 10, square=True)
-                    crop_rgb = gt_rgb[i][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
-                    res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
-                    hmr_output = model.hmr_model(res_rgb)
+                    if model.hmr_model is not None:
+                        _yl, _yr, _xl, _xr = get_bbox(gt_mask[i], 10, square=True)
+                        crop_rgb = gt_rgb[i][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
+                        res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
+                        hmr_output = model.hmr_model(res_rgb)
                     opti_smpl_params = {}
                     opti_smpl_params['global_orient'] = axis_angle_to_matrix(pose_base[i][None])
                     opti_smpl_params['body_pose'] = axis_angle_to_matrix(pose_rest[i][None])
-                    opti_smpl_params['betas'] = hmr_output['pred_smpl_params']['betas']
+                    opti_smpl_params['betas'] = betas
                     opti_smpl_output = self.smpl(**{k: v.float() for k,v in opti_smpl_params.items()}, pose2rot=False)
-                    gt_smpl_params = {}
-                    gt_smpl_params['global_orient'] = axis_angle_to_matrix(data_pack[7][i][:1][None])
-                    gt_smpl_params['body_pose'] = axis_angle_to_matrix(data_pack[7][i][1:][None])
-                    gt_smpl_params['betas'] = hmr_output['pred_smpl_params']['betas']
-                    gt_smpl_output = self.smpl(**{k: v.float() for k,v in gt_smpl_params.items()}, pose2rot=False)
+                    if gt_pose is not None:
+                        gt_smpl_params = {}
+                        gt_smpl_params['global_orient'] = axis_angle_to_matrix(gt_pose[i][:1][None])
+                        gt_smpl_params['body_pose'] = axis_angle_to_matrix(gt_pose[i][1:][None])
+                        gt_smpl_params['betas'] = betas
+                        gt_smpl_output = self.smpl(**{k: v.float() for k,v in gt_smpl_params.items()}, pose2rot=False)
                     gs_points = torch.cat((mu-global_trans, sph), dim=-1)
-                    gen = generator(points=gs_points,
-                                    pred_vertices=hmr_output['pred_vertices'],
+                    gen = self.o3d_viz.generator(points=gs_points,
+                                    pred_vertices=hmr_output['pred_vertices'] if model.hmr_model is not None else None,
                                     opti_vertices=opti_smpl_output.vertices, 
-                                    gt_vertices=gt_smpl_output.vertices,
+                                    gt_vertices=gt_smpl_output.vertices if gt_pose is not None else None,
                                     faces=self.smpl.faces)
                     self.o3d_viz.show(gen)
 
@@ -864,8 +868,6 @@ class TGFitter:
                     pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
                     pred_pose_base_list.append(pred_pose_base)
                     pred_pose_rest_list.append(pred_pose_rest)
-                real_data_provider.gt_pose_base_list = real_data_provider.pose_base_list.clone()
-                real_data_provider.gt_pose_rest_list = real_data_provider.pose_rest_list.clone()
                 real_data_provider.pose_base_list = torch.nn.Parameter(torch.cat(pred_pose_base_list, dim=0))
                 real_data_provider.pose_rest_list = torch.nn.Parameter(torch.cat(pred_pose_rest_list, dim=0))
 
@@ -904,7 +906,7 @@ class TGFitter:
             loss = 0.0
             if real_flag:
                 real_data_pack = real_data_provider(
-                    self.N_POSES_PER_STEP, continuous=False, use_hmr=use_hmr
+                    self.N_POSES_PER_STEP, continuous=False
                 )
                 (
                     loss_recon,
@@ -1284,7 +1286,7 @@ class TGFitter:
         logging.info(f"Model has {model.N} points.")
         N_frames = len(real_data_provider.rgb_list)
         ret = real_data_provider(N_frames)
-        gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = ret
+        gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = ret[:7]
         pose = torch.cat([pose_base, pose_rest], 1)
         H, W = gt_rgb.shape[1:3]
         sph_o = model.max_sph_order
@@ -1424,6 +1426,9 @@ if __name__ == "__main__":
     if dataset_mode == "zju":
         smpl_path = "./data/smpl-meta/SMPL_NEUTRAL.pkl"
         mode = "human"
+    elif dataset_mode == "aist":
+        mode = "human"
+        smpl_path = "./data/smpl-meta/SMPL_NEUTRAL.pkl"
     elif dataset_mode == "people_snapshot":
         mode = "human"
         if seq_name.startswith("female"):
@@ -1472,7 +1477,7 @@ if __name__ == "__main__":
         data_provider.load_state_dict(
             torch.load(osp.join(log_dir, "training_poses.pth")), strict=True
         )
-        solver.eval_fps(solver.load_saved_model(), data_provider, rounds=10)
+        solver.eval_fps(solver.load_saved_model(), data_provider, rounds=1)
         tg_fitting_eval(solver, dataset_mode, seq_name, data_provider)
         logging.info("Done")
         sys.exit(0)
@@ -1498,7 +1503,7 @@ if __name__ == "__main__":
     elif mode == "dog":
         viz_dog_all(solver, optimized_seq)
 
-    solver.eval_fps(solver.load_saved_model(), optimized_seq, rounds=10)
+    solver.eval_fps(solver.load_saved_model(), optimized_seq, rounds=1)
     if args.no_eval:
         logging.info("No eval, done!")
         sys.exit(0)

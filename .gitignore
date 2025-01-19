@@ -175,3 +175,5 @@ lib_gart/smal/smal_data
 dev_tools
 .vscode
 test*
+*.mp4
+nohup*

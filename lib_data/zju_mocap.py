@@ -339,6 +339,6 @@ class Dataset(Dataset):
 
 
 if __name__ == "__main__":
-    dataset = Dataset(data_root="../data/zju-mocap")
+    dataset = Dataset(data_root="data/zju_mocap")
     ret = dataset[0]
     print(ret)

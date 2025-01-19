@@ -1,3 +1,4 @@
+import cv2
 from matplotlib import pyplot as plt
 from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
 import imageio
@@ -13,7 +14,7 @@ from lib_render.gauspl_renderer import render_cam_pcl
 from lib_gart.model_utils import transform_mu_frame
 
 from utils.misc import *
-from utils.viz import viz_render
+from utils.viz import render_mesh, viz_render
 
 
 @torch.no_grad()
@@ -175,10 +176,15 @@ def viz_human_all(
         pose_base_list = data_provider.pose_base_list
         pose_rest_list = data_provider.pose_rest_list
         global_trans_list = data_provider.global_trans_list
+        global_trans_list_orig = data_provider.global_trans_list_original
         pose_list = torch.cat([pose_base_list, pose_rest_list], 1)
+        pose_list_orig = data_provider.pose_list_original
         pose_list, global_trans_list = pose_list.to(
             solver.device
         ), global_trans_list.to(solver.device)
+        pose_list_orig = pose_list_orig.to(solver.device)
+        global_trans_list_orig = global_trans_list_orig.to(solver.device)
+        betas = data_provider.betas.to(solver.device)
         rgb_list = data_provider.rgb_list
         mask_list = data_provider.mask_list
         K_list = data_provider.K_list
@@ -193,22 +199,17 @@ def viz_human_all(
     if data_provider is not None:
         print("Viz training...")
         viz_frames = []
+        if solver.render_mesh:
+            os.makedirs(f"{viz_dir}/blend_img_opti", exist_ok=True)
+            os.makedirs(f"{viz_dir}/blend_img_orig", exist_ok=True)
         for t in range(len(pose_list)):
             if t % training_skip != 0:
                 continue
-            # if model.hmr_model is not None:
-            #     _yl, _yr, _xl, _xr = get_bbox(mask_list[t], 10, square=True)
-            #     crop_rgb = rgb_list[t][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
-            #     res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
-            #     hmr_output = model.hmr_model(res_rgb)
-            #     pred_pose_base = matrix_to_axis_angle(hmr_output['pred_smpl_params']['global_orient'])
-            #     pred_pose_rest = matrix_to_axis_angle(hmr_output['pred_smpl_params']['body_pose'])
-            #     pose = torch.cat([pred_pose_base, pred_pose_rest], dim=1)
-            # else:
-            #     pose = pose_list[t][None]
             pose = pose_list[t][None]
             K = K_list[t]
             trans = global_trans_list[t][None]
+            pose_orig = pose_list_orig[t][None]
+            trans_orig = global_trans_list_orig[t][None]
             time_index = torch.Tensor([t]).long().to(solver.device)
             mu, fr, s, o, sph, _ = model(
                 pose,
@@ -238,6 +239,37 @@ def viz_human_all(
             )
             viz_frame = viz_render(rgb_list[t], mask_list[t], render_pkg)
             viz_frames.append(viz_frame)
+            opti_smpl_params = {}
+            opti_smpl_params['global_orient'] = axis_angle_to_matrix(pose[:, :1])
+            opti_smpl_params['body_pose'] = axis_angle_to_matrix(pose[:, 1:])
+            opti_smpl_params['betas'] = betas[None]
+            opti_smpl_params['transl'] = trans
+            opti_smpl_output = solver.smpl(**{k: v.float() for k,v in opti_smpl_params.items()}, pose2rot=False)
+            orig_smpl_params = {}
+            orig_smpl_params['global_orient'] = axis_angle_to_matrix(pose_orig[:, :1])
+            orig_smpl_params['body_pose'] = axis_angle_to_matrix(pose_orig[:, 1:])
+            orig_smpl_params['betas'] = betas[None]
+            orig_smpl_params['transl'] = trans_orig
+            orig_smpl_output = solver.smpl(**{k: v.float() for k,v in orig_smpl_params.items()}, pose2rot=False)
+            if solver.viz_smpl:
+                if model.hmr_model is not None:
+                    _yl, _yr, _xl, _xr = get_bbox(mask_list[t], 10, square=True)
+                    crop_rgb = rgb_list[t][_yl:_yr, _xl:_xr][None].permute(0,3,1,2).contiguous()
+                    res_rgb = torch.nn.functional.interpolate(crop_rgb, size=(256, 256), mode='bilinear')
+                    hmr_output = model.hmr_model(res_rgb)
+                    pred_verts = hmr_output['pred_vertices']
+                gs_points = torch.cat((mu-trans, sph), dim=-1)
+                gen = solver.o3d_viz.generator(points=gs_points,
+                                pred_vertices=pred_verts if model.hmr_model is not None else None,
+                                opti_vertices=opti_smpl_output.vertices-trans,
+                                gt_vertices=orig_smpl_output.vertices-trans_orig,
+                                faces=solver.smpl.faces)
+                solver.o3d_viz.show(gen)
+            elif solver.render_mesh:
+                blend_img_opti = render_mesh(rgb_list[t]*255, opti_smpl_output.vertices[0], solver.smpl.faces, K)
+                cv2.imwrite(f"{viz_dir}/blend_img_opti/frame_{t:04}.png", cv2.cvtColor(blend_img_opti, cv2.COLOR_BGR2RGB))
+                blend_img_orig = render_mesh(rgb_list[t]*255, orig_smpl_output.vertices[0], solver.smpl.faces, K)
+                cv2.imwrite(f"{viz_dir}/blend_img_orig/frame_{t:04}.png", cv2.cvtColor(blend_img_orig, cv2.COLOR_BGR2RGB))
         imageio.mimsave(f"{viz_dir}/training.gif", viz_frames)
 
     # viz static spinning

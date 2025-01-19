@@ -305,6 +305,40 @@ class StreamVisualization(O3DStreamPlot):
         self.ctr.set_lookat(np.array([0, 0, 0]))
         self.ctr.set_zoom(1)
 
+
+    def generator(self, points=None, pred_joints=None, gt_joints=None, pred_vertices=None, opti_vertices=None, gt_vertices=None, faces=None):
+        for i in range(len(pred_vertices)):
+            res = {}
+            res.update(dict(
+                points = dict(
+                    pcl = copy2cpu(points[i][:,:3]) if points is not None else None,
+                    colors = copy2cpu(points[i][:,3:6]) if points is not None else [0,0,0.8],
+                ),
+                pred_joints = dict(
+                    pcl = copy2cpu(pred_joints)[i][:,:3] if pred_joints is not None else None,
+                    lines = SMPL_JOINT_LINES,
+                    color = np.asarray([245, 157, 86]) / 255,
+                ),
+                label_joints = dict(
+                    pcl = copy2cpu(gt_joints)[i][:,:3] if gt_joints is not None else None,
+                    lines = SMPL_JOINT_LINES,
+                    color = np.asarray([0, 0, 240]) / 255,
+                ),
+                pred_verts = dict(
+                    mesh = [copy2cpu(pred_vertices)[i], copy2cpu(faces)] if pred_vertices is not None else None,
+                    color = np.asarray([143, 240, 166]) / 255
+                ),
+                opti_verts = dict(
+                    mesh = [copy2cpu(opti_vertices)[i], copy2cpu(faces)] if opti_vertices is not None else None,
+                    color = np.asarray([158, 219, 251]) / 255
+                ),
+                label_verts = dict(
+                    mesh = [copy2cpu(gt_vertices)[i], copy2cpu(faces)] if gt_vertices is not None else None,
+                    color = np.asarray([235, 189, 191]) / 255,
+                ),
+            ))
+            yield res
+
 SMPL_JOINT_LINES = np.asarray([
     (0, 1),    # Pelvis -> Left Hip
     (0, 2),    # Pelvis -> Right Hip
@@ -338,37 +372,3 @@ def copy2cpu(tensor):
         return tensor.detach().cpu().numpy()
     else:
         return None
-
-
-def generator(points=None, pred_joints=None, gt_joints=None, pred_vertices=None, opti_vertices=None, gt_vertices=None, faces=None):
-    for i in range(len(pred_vertices)):
-        res = {}
-        res.update(dict(
-            points = dict(
-                pcl = copy2cpu(points[i][:,:3]) if points is not None else None,
-                colors = copy2cpu(points[i][:,3:6]) if points is not None else [0,0,0.8],
-            ),
-            pred_joints = dict(
-                pcl = copy2cpu(pred_joints)[i][:,:3] if pred_joints is not None else None,
-                lines = SMPL_JOINT_LINES,
-                color = np.asarray([245, 157, 86]) / 255,
-            ),
-            label_joints = dict(
-                pcl = copy2cpu(gt_joints)[i][:,:3] if gt_joints is not None else None,
-                lines = SMPL_JOINT_LINES,
-                color = np.asarray([0, 0, 240]) / 255,
-            ),
-            pred_verts = dict(
-                mesh = [copy2cpu(pred_vertices)[i], copy2cpu(faces)] if pred_vertices is not None else None,
-                color = np.asarray([143, 240, 166]) / 255
-            ),
-            opti_verts = dict(
-                mesh = [copy2cpu(opti_vertices)[i], copy2cpu(faces)] if opti_vertices is not None else None,
-                color = np.asarray([158, 219, 251]) / 255
-            ),
-            label_verts = dict(
-                mesh = [copy2cpu(gt_vertices)[i], copy2cpu(faces)] if gt_vertices is not None else None,
-                color = np.asarray([235, 189, 191]) / 255,
-            ),
-        ))
-        yield res

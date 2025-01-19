@@ -184,7 +184,6 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
         index=None,
         return_index=False,
         force_uniform=False,
-        use_hmr=False,
     ):
         device = self.pose_base_list.device
         # for uniform is for pose optimization
@@ -230,18 +229,7 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
         #     complement_Ts = Ts[t]
         #     return gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, complement_Ts
         # else:
-        if use_hmr:
-            gt_pose = torch.cat([self.gt_pose_base_list[t], self.gt_pose_rest_list[t]], dim=1)
-            return (
-                gt_rgb.to(device),
-                gt_mask.to(device),
-                K.to(device),
-                pose_base,
-                pose_rest,
-                global_trans,
-                t.to(device),
-                gt_pose,
-            )
+        pose_orig = self.pose_list_original[t]
         return (
             gt_rgb.to(device),
             gt_mask.to(device),
@@ -250,6 +238,8 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
             pose_rest,
             global_trans,
             t.to(device),
+            pose_orig,
+            self.betas,
         )
 
     def prepare_for_fitting(self, dataset):
